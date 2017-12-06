@@ -1,2 +1,3 @@
-# *CRISPEY*: Mapping causal genetic variants with parallel genome editing
+# *CRISPEY*: 
+# Mapping causal genetic variants with parallel genome editing
 
