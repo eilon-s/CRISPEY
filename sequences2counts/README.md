@@ -27,6 +27,7 @@ Column order is not felxible and the table can contain any additional columns
 
 We found that raw reads mapped by STAR with zero mismatch parameter give good performances.
 
- 
+ # Snakemake workflow rules graph
+![sequences2counts](crispey_seq2counts_rule_graph.pdf)
 
 
