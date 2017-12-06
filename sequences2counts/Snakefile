@@ -1,0 +1,964 @@
+
+configfile: "./crispr_analysis_config.json"
+
+
+## add something for error outputs...
+# snakemake -j 256 --cluster-config cluster_sm_analysis.json \
+#     --cluster "sbatch --job-name {cluster.job_name} -o slurm_files/{wildcards.sample}.out -e slurm_files/{wildcards.sample}.error --time {cluster.run_time} --cpus-per-task {cluster.cores} --mem {cluster.memory}"
+#
+# every rule doesn't involve a sample...
+#snakemake -j 256 --cluster-config cluster_sm_analysis.json \
+#	--cluster "sbatch --job-name {cluster.job_name} -o slurm_files/{params.error_out_file}.out -e slurm_files/{params.error_out_file}.error --time {cluster.run_time} --cpus-per-task {cluster.cores} --mem {cluster.memory}"
+#
+
+# srun -p hbfraser,pritch -c 1 -t 159:59:59 --mem=4000 --pty bash
+
+# kinit eilon@stanford.edu && nohup rsync -avz -e "ssh -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes" --progress /science/eilon/crispr eilon@sherlock.stanford.edu:/scratch/PI/pritch/eilon/ &
+
+# squeue -u eilon -o "%.18i %.40P %.30j %.8u %.8T %.10M %.9l %.6D %R"
+
+
+# tmp - for fragment length
+#python ~/bin/cfDNA1G/python/cfDNA_fragment_len_dist.py mapping/starExact0_raw/It0_Ir1.Aligned.out.bam fragment_len/starExact0_raw/fragLen_It0_Ir1.tsv.gz -m 1000 -s It0_Ir1
+
+##########################################################################################
+# input parameters (in config file)
+##########################################################################################
+
+READS = ["1","2"]
+TRIM_STATE = ["raw","trim"]
+
+STAR_MISMATCH = ["0","1","2", "10"]
+MAPPERS = ["starExact" + mismatch for mismatch in STAR_MISMATCH]
+MAIN_MAPPER = "starExact0_raw"
+#MAIN_MAPPER = "starExact0_trim"
+VCF_MAPPER = "starExact10_raw"
+
+ALL_POOLS = config['__default__']['ALL_POOLS']
+EXP_POOLS = config['__default__']['EXP_POOLS']
+
+
+EXPERIMENT_NAME = config['__default__']['EXPERIMENT_NAME']
+INPUT_PLASMID_FILE = config['__default__']['INPUT_PLASMID_FILE']
+PLASMID_SEQ_NAME = config['__default__']['PLASMID_SEQ_NAME']
+POSSIBLE_CONTAMINATION_OLIGO_NAME = config['__default__']['POSSIBLE_CONTAMINATION_OLIGO_NAME']
+SCRIPTS_PATH = config['__default__']['SCRIPTS_PATH']
+LIB_DESIGN_NAME = config['__default__']['LIB_DESIGN_NAME']
+
+
+INPUT_SAMPLES_FILE  = config['__default__']['DATA_DIR'] + "/samples_" + EXPERIMENT_NAME + ".txt"
+OUTPUT_SAMPLES_FILE = "Output/" + EXPERIMENT_NAME + "/samples.txt"
+
+print("Scripts path: " + SCRIPTS_PATH)
+
+
+##########################################################################################
+# printing run info
+##########################################################################################
+
+print("Running experiment: " + EXPERIMENT_NAME)
+print("=" * 80)
+print("Using %s as the main mapping algorithm (used for counts)" % (MAIN_MAPPER))
+print("=" * 80)
+
+##########################################################################################
+# parsing samples table
+##########################################################################################
+
+import os
+import pandas as pd
+
+def parse_samples_table(input_samples_table_filename, output_samples_table_filename):
+	print('reading samples file: %s' % (input_samples_table_filename))
+	samples_df = pd.read_table(input_samples_table_filename, sep='\t', na_values = "")
+
+	#samples_df.induction_time_index = samples_df.induction_time_index.astype(int)
+	#samples_df.competition_time_index = samples_df.competition_time_index.astype(int)
+
+
+	samples_df.loc[(samples_df.competition_time == 0),'sample_ID'] = \
+                           'It' + samples_df.induction_time_index[samples_df.competition_time == 0].astype(str) + \
+                     '_' + 'Ir' + samples_df.induction_replicate[samples_df.competition_time  == 0].astype(str) 
+
+
+	samples_df.loc[(samples_df.competition_time>0),'sample_ID'] = \
+                           'It' + samples_df.induction_time_index[samples_df.competition_time>0].astype(str) + \
+                     '_' + 'Ir' + samples_df.induction_replicate[samples_df.competition_time>0].astype(str) + \
+                     '_' + 'Ct' + samples_df.competition_time_index[samples_df.competition_time>0].astype(str) + \
+                     '_' + 'Cr' + samples_df.competition_replicate[samples_df.competition_time>0].astype(str) + \
+                     '_' + 'Cm' + samples_df.competition_medium[samples_df.competition_time>0].astype(str) 
+
+	dict_sample_2_R1 = {}
+	dict_sample_2_R2 = {}
+	for sample,file_r1,file_r2 in zip(samples_df['sample_ID'].tolist(), samples_df['Sequencing_reads_R1'].tolist(), samples_df['Sequencing_reads_R2'].tolist()):
+		dict_sample_2_R1[sample] = file_r1
+		dict_sample_2_R2[sample] = file_r2
+
+
+	# saving parsed table name
+	if output_samples_table_filename:
+		out_dir = os.path.dirname(output_samples_table_filename)
+		if not os.path.exists(out_dir):
+			os.makedirs(out_dir)
+		samples_df.to_csv(output_samples_table_filename, sep='\t', index = False)
+
+	return( (samples_df['sample_ID'].tolist(), dict_sample_2_R1, dict_sample_2_R2)     )
+
+
+SAMPLES, SAMPLE_2_R1_DICT, SAMPLE_2_R2_DICT = parse_samples_table(INPUT_SAMPLES_FILE, OUTPUT_SAMPLES_FILE)
+
+print('Samples: %s' % (str(SAMPLES)))
+
+
+##########################################################################################
+# create jobs directory
+##########################################################################################
+
+JOBS_DIR = "Output/" + EXPERIMENT_NAME + "/jobs_files"
+
+if not os.path.exists(JOBS_DIR):
+    os.makedirs(JOBS_DIR)
+
+
+##########################################################################################
+# all
+##########################################################################################
+
+#rule all:
+#	input:
+#		sim_fastq_R1_file=expand("../data/" + EXPERIMENT_NAME + "/sim100WithSNPs/{sample}"  +".R1.fastq.gz", sample=SAMPLES)
+
+
+rule all:
+	input:
+		exp_nonuniq_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_nonuniq.tsv",
+		exp_pool_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_pool.tsv",
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/counts.tsv",
+		merged_count_table_starExact = expand("Output/" + EXPERIMENT_NAME + "/counts/starExact{mismatches}_{trimstate}/counts.tsv", mismatches = STAR_MISMATCH, trimstate = TRIM_STATE),
+		merged_plasmid_count_table_starExact = expand("Output/" + EXPERIMENT_NAME + "/counts/starExact{mismatches}_{trimstate}/plasmid_counts.tsv", mismatches = STAR_MISMATCH, trimstate = TRIM_STATE),
+		merged_count_table_kallisto = expand("Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/counts.tsv", trimstate = TRIM_STATE),
+		merged_plasmid_count_table_kallisto = expand("Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/plasmid_counts.tsv", trimstate = TRIM_STATE),
+		merged_count_table_bwa         = expand("Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate}/counts.tsv", trimstate = TRIM_STATE),
+		merged_plasmid_count_table_bwa = expand("Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate}/plasmid_counts.tsv", trimstate = TRIM_STATE),
+		multiqc_out="Output/" + EXPERIMENT_NAME + "/multi_reports/multiqc_report.html",
+		pool_with_counts="Output/" + EXPERIMENT_NAME + "/Figures/pool_with_counts.tsv",
+#		pool_variants_vcf = "Output/" + EXPERIMENT_NAME + "/variant/lib_pools.var.raw.vcf"
+		
+		
+		
+#		merged_count_table_bowtie = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/counts.tsv",
+#		merged_count_table_kallisto = "Output/" + EXPERIMENT_NAME + "/counts/kallisto/counts.tsv",
+#		merged_count_table_kallistoRaw = "Output/" + EXPERIMENT_NAME + "/counts/kallistoRaw/counts.tsv",
+#		merged_count_table_starRaw = "Output/" + EXPERIMENT_NAME + "/counts/starRaw/counts.tsv",
+		
+#		merged_plasmid_count_table_star = "Output/" + EXPERIMENT_NAME + "/counts/star/plasmid_counts.tsv",
+#		merged_plasmid_count_table_bowtie = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/plasmid_counts.tsv",
+#		merged_plasmid_count_table_kallisto = "Output/" + EXPERIMENT_NAME + "/counts/kallisto/plasmid_counts.tsv",
+#		merged_plasmid_count_table_kallistoRaw = "Output/" + EXPERIMENT_NAME + "/counts/kallistoRaw/plasmid_counts.tsv",
+#		merged_plasmid_count_table_starRaw = "Output/" + EXPERIMENT_NAME + "/counts/starRaw/plasmid_counts.tsv",
+#		merged_count_table_star = "Output/" + EXPERIMENT_NAME + "/counts/star/counts.tsv",
+#		fastqc_reads=expand("Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R{read}_fastqc.{suf}",read=READS, trim_state=TRIM_STATE, sample=SAMPLES,suf=['html','zip']),
+#		fastqc_mapped=expand("Output/" + EXPERIMENT_NAME + "/fq_reports/mapped/{mapper}/{sample}.Aligned.out_fastqc.{suf}",sample=SAMPLES,suf=['html','zip']),
+#		multiqc_out="Output/" + EXPERIMENT_NAME + "/multi_reports/multiqc_report.html",
+#		pool_with_counts="Output/" + EXPERIMENT_NAME + "/Figures/pool_with_counts.tsv",
+#		pool_variants_vcf = "Output/" + EXPERIMENT_NAME + "/variant/lib_pools.var.raw.vcf"
+#		sim_fastq_R1_file=expand("../data/" + EXPERIMENT_NAME + "/sim75/{sample}"  +".R1.fastq.gz", sample=SAMPLES)
+
+##########################################################################################
+# simulating reads (not part of the pipeline)
+##########################################################################################
+
+# TODO add the code to create the simulated data table 
+
+rule generate_sim_fastq_files:
+	input:
+		ref_fa="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa",
+		sim_merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/pool_with_counts_sim.tsv",
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[0] + "/{sample}" + "." + TRIM_STATE[0] + ".R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[0] + "/{sample}" + "." + TRIM_STATE[0] + ".R2.fastq.gz"
+	output:
+		sim_fastq_R1_file="../data/" + EXPERIMENT_NAME + "/sim100WithSNPs/{sample}"  +".R1.fastq.gz",
+		sim_fastq_R2_file="../data/" + EXPERIMENT_NAME + "/sim100WithSNPs/{sample}"  +".R2.fastq.gz"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="generate_sim_fastq_files_{sample}",
+		job_name="generate_sim_fastq_files_{sample}",
+		run_time="10:00:00",
+		cores="1",
+		memory="16",
+		read_length="100",
+		cur_smaple="{sample}"
+	threads: 1
+	script:
+		"{SCRIPTS_PATH}/crispr_generate_sim_reads.py"
+
+
+##########################################################################################
+# copying sequencing files
+##########################################################################################
+
+rule cp_sequencing_files:
+	input:
+		r1 = lambda wildcards: SAMPLE_2_R1_DICT[wildcards.sample],
+		r2 = lambda wildcards: SAMPLE_2_R2_DICT[wildcards.sample],
+	output: 
+		r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/raw/{sample,[^\/]+}.raw.R1.fastq.gz",
+		r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/raw/{sample,[^\/]+}.raw.R2.fastq.gz"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="cp_reads_{sample}",
+		job_name="cp_reads_{sample}",
+		run_time="04:00:00",
+		cores="1",
+		memory="4"
+	shell:
+		"cp {input.r1} {output.r1}; "
+		"cp {input.r2} {output.r2}; "
+		"touch {output.r1}; "
+		"touch {output.r2}; "
+
+
+
+##########################################################################################
+# preparing the library reference for mapping
+##########################################################################################
+
+
+#ALL_POOLS_FA = "./lib_reference/lib_pools.fa"
+#ALL_POOLS_TABLE = "./lib_reference/lib_pools.tab"
+
+# joining pool files into one fasta file
+rule pools2fa:
+	input:
+		pools=expand("../lib_design/Output/pools/{pool}.txt", pool=ALL_POOLS),
+		plasmid = INPUT_PLASMID_FILE
+	output:
+		fa    = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa",
+		table = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.tab"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="pools2fa",
+		job_name="pools2fa",
+		run_time="02:00:00",
+		cores="1",
+		memory="8"
+	script:
+		SCRIPTS_PATH + "/crispr_ana_pools2fa.py"
+
+# params: threads=8
+rule build_star_index:
+	input:
+		ref_fa="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/SAindex"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="build_star_index",
+		job_name="build_star_index",
+		run_time="20:00:00",
+		cores="2",
+		memory="16"
+	threads: 2
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/star/indexing.log"
+	shell:
+		"(STAR --runMode genomeGenerate"
+		" --runThreadN {threads}"
+		" --genomeDir Output/{EXPERIMENT_NAME}/lib_reference --genomeFastaFiles {input.ref_fa}"
+		" --genomeSAindexNbases	11 --genomeChrBinNbits 8) 2> {log}"
+
+rule build_kallisto_index:
+	input:
+		ref_fa="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa"
+	output:
+		idx_file="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.idx"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="build_kallisto_index",
+		job_name="build_kallisto_index",
+		run_time="1:00:00",
+		cores="1",
+		memory="8"
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/kallisto/indexing.log"
+	shell:
+		"(kallisto index -i {output.idx_file} {input.ref_fa}) 2> {log}"
+
+rule build_bwa_index:
+	input:
+		ref_fa="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.pac",
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.bwt",
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.ann",
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.amb",
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.sa"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="build_bwa_index",
+		job_name="build_bwa_index",
+		run_time="4:00:00",
+		cores="2",
+		memory="8"
+	threads: 2
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/bwa/indexing.log"
+	shell:
+		"(bwa index {input.ref_fa}) 2> {log}"
+
+
+
+##########################################################################################
+# trimming the reads to remove the Stagger 
+##########################################################################################
+
+# TODO - better to trim or not?
+rule trim_read_stagger:
+	input:
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[0] + "/{sample}" + "." + TRIM_STATE[0] + ".R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[0] + "/{sample}" + "." + TRIM_STATE[0] + ".R2.fastq.gz"
+	output:
+		fastq_trim_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[1] + "/{sample}" + "." + TRIM_STATE[1] + ".R1.fastq.gz",
+		fastq_trim_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[1] + "/{sample}" + "." + TRIM_STATE[1] + ".R2.fastq.gz"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="trim_{sample}",
+		job_name="trim_{sample}",
+		run_time="47:59:00",
+		cores="4",
+		memory="30"
+	shell:
+		"cutadapt "
+		" -g {config[trim_read_stagger][read1_5prime_adaptor2remove]}"
+		" -a {config[trim_read_stagger][read1_3prime_adaptor2remove]}"
+		" -G {config[trim_read_stagger][read2_5prime_adaptor2remove]}"
+		" -A {config[trim_read_stagger][read2_3prime_adaptor2remove]}"
+		" -O 10 --pair-filter=any -m {config[trim_read_stagger][min_read_len_after_trim]}"
+		" -o {output.fastq_trim_file_r1} -p {output.fastq_trim_file_r2} {input.fastq_file_r1} {input.fastq_file_r2}"
+
+# " -G {config[trim_read2_3stagger][read2_5prime_stagger_plus_oligo3prime]}"
+
+
+##########################################################################################
+# mapping reads (main track - using STAR from trim)
+##########################################################################################
+
+
+# TODO - better to trim or not?
+
+rule map_reads_using_STAR:
+	input:
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R2.fastq.gz",
+		lib_index     = "Output/" + EXPERIMENT_NAME + "/lib_reference/SAindex"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/mapping/starExact{maxmismatch,\d+}_{trimstate, \D+}/{sample, [^\/]+}.Aligned.out.bam"
+	params:
+		lib_reference_dir = "Output/" + EXPERIMENT_NAME + "/lib_reference",
+		output_prefix = "Output/" + EXPERIMENT_NAME + "/mapping/starExact{maxmismatch}_{trimstate}/{sample}.",
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="map_starExact{maxmismatch}_{trimstate}_{sample}",
+		job_name="map_starExact{maxmismatch}_{trimstate}_{sample}",
+		run_time="47:59:00",
+		cores="4",
+		memory="31"
+	threads: 4
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/star/starExact{maxmismatch}_{trimstate}.mapping.{sample}.log"
+	shell:
+		"(STAR --runThreadN {threads} --runMode alignReads"
+		" --genomeDir {params.lib_reference_dir}"
+		" --readFilesIn {input.fastq_file_r1} {input.fastq_file_r2}"
+		" --readFilesCommand zcat"
+		" --outFileNamePrefix {params.output_prefix}"
+		" --outSAMtype BAM Unsorted"
+		" --outFilterMultimapNmax 1"
+		" --outReadsUnmapped Fastx"
+		" --outFilterMismatchNmax {wildcards.maxmismatch}"
+		" ) 2> {log}"
+
+
+rule count_mapped_reads_STAR:
+	input:
+		mapped_reads = "Output/" + EXPERIMENT_NAME + "/mapping/starExact{maxmismatch}_{trimstate}/{sample}.Aligned.out.bam",
+		uniq_table   = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.tab"
+	output:
+		count_table = "Output/" + EXPERIMENT_NAME + "/counts/starExact{maxmismatch, \d+}_{trimstate, \D+}/counts_{sample}.tsv.gz",
+		plasmid_count_table = "Output/" + EXPERIMENT_NAME + "/counts/starExact{maxmismatch,\d+}_{trimstate}/plasmid_counts_{sample}.tsv.gz"
+	params: 
+		col_name         = "{sample}",
+		plasmid_seq_name = PLASMID_SEQ_NAME,
+		plasmid_contamination_oligo_name = POSSIBLE_CONTAMINATION_OLIGO_NAME,
+		min_tlen = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_tlen"],
+		max_tlen = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_max_tlen"],
+		max_5prime_pos = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_max_5prime_pos"],
+		min_mapped_read1_len = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_mapped_read1_len"],
+		min_mapped_read2_len = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_mapped_read2_len"],
+		job_out_dir      = "Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file     = "count_starExact{maxmismatch}_{trimstate}_{sample}",
+		job_name         = "count_starExact{maxmismatch}_{trimstate}_{sample}",
+		run_time         = "95:59:00",
+		cores            = "2",
+		memory           = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_count_mapped_reads.py"
+		" {input.mapped_reads}"
+		" {params.col_name}"
+		" {params.plasmid_seq_name}"
+		" {params.plasmid_contamination_oligo_name}"
+		" {input.uniq_table}"
+		" {output.count_table}"
+		" {output.plasmid_count_table}"
+		" -s {params.min_tlen}"
+		" -l {params.max_tlen}"
+		" -1 {params.min_mapped_read1_len}"
+		" -2 {params.min_mapped_read2_len}"
+
+
+rule merge_read_counts_STAR:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/starExact{{maxmismatch}}_{{trimstate}}/counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/starExact{maxmismatch,\d+}_{trimstate, \D+}/counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_counts_starExact{maxmismatch}_{trimstate}",
+		job_name     = "merge_counts_starExact{maxmismatch}_{trimstate}",
+		run_time     = "23:59:00",
+		cores        = "1",
+		memory       = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+rule merge_read_plasmid_counts_STAR:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/starExact{{maxmismatch}}_{{trimstate}}/plasmid_counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/starExact{maxmismatch}_{trimstate}/plasmid_counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_plasmid_counts_starExact{maxmismatch}_{trimstate}",
+		job_name     = "merge_plasmid_counts_starExact{maxmismatch}_{trimstate}",
+		run_time     = "2:00:00",
+		cores        = "1",
+		memory       = "4"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+###################################
+# main mapper
+###################################
+
+rule cp_main_read_counts:
+	input:
+		cnt = "Output/" + EXPERIMENT_NAME + "/counts/" + MAIN_MAPPER + "/counts.tsv",
+		cnt_plasmid = "Output/" + EXPERIMENT_NAME + "/counts/" + MAIN_MAPPER + "/plasmid_counts.tsv"
+	output:
+		cnt = "Output/" + EXPERIMENT_NAME + "/counts/counts.tsv",
+		cnt_plasmid = "Output/" + EXPERIMENT_NAME + "/counts/plasmid_counts.tsv"
+	params: 
+		job_out_dir  = "Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "cp_main_mapper_counts",
+		job_name     = "cp_main_mapper_counts",
+		run_time     = "23:59:00",
+		cores        = "1",
+		memory       = "4"
+	shell:
+		"cp {input.cnt} {output.cnt};"
+		"cp {input.cnt_plasmid} {output.cnt_plasmid};"
+
+##########################################################################################
+# mapping with kallisto
+##########################################################################################
+
+
+
+rule map_reads_using_kallisto:
+	input:
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R2.fastq.gz",
+		lib_index          = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.idx"
+	output:
+		abundance = "Output/" + EXPERIMENT_NAME + "/mapping/kallisto_{trimstate}/{sample, [^\/]+}/abundance.tsv",
+		bam = "Output/" + EXPERIMENT_NAME + "/mapping/kallisto_{trimstate}/kallisto_{trimstate}.{sample, [^\/]+}/out.bam",
+	params:
+		output_prefix= "Output/" + EXPERIMENT_NAME + "/mapping/kallisto_{trimstate}/{sample}",
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="map_kallisto_{trimstate}_{sample}",
+		job_name="map_kallisto_{trimstate}_{sample}",
+		run_time="47:59:00",
+		cores="2",
+		memory="16"
+	threads: 8
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/kallisto/kallisto_{trimstate}.mapping.{sample}.log"
+	shell:
+		"kallisto quant -i {input.lib_index} " # -b 100
+		" -o {params.output_prefix} "
+		" --pseudobam "
+		" {input.fastq_file_r1} {input.fastq_file_r2}"
+		" | samtools view -Sb - > {output.bam};"
+
+
+rule count_mapped_reads_kallisto:
+	input:
+		abundance   = "Output/" + EXPERIMENT_NAME + "/mapping/kallisto_{trimstate}/{sample}/abundance.tsv",
+		uniq_table  = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.tab"
+	output:
+		count_table = "Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/counts_{sample}.tsv.gz",
+		plasmid_count_table = "Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/plasmid_counts_{sample}.tsv.gz"
+	params: 
+		col_name         = "{sample}",
+		plasmid_seq_name = PLASMID_SEQ_NAME,
+		plasmid_contamination_oligo_name = POSSIBLE_CONTAMINATION_OLIGO_NAME,
+		job_out_dir      = "Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file     = "count_map_kallisto_{trimstate}_{sample}",
+		job_name         = "count_map_kallisto_{trimstate}_{sample}",
+		run_time         = "47:59:00",
+		cores            = "1",
+		memory           = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_count_mapped_reads.py"
+		" {input.abundance}"
+		" {params.col_name}"
+		" {params.plasmid_seq_name}"
+		" {params.plasmid_contamination_oligo_name}"
+		" {input.uniq_table}"
+		" {output.count_table}"
+		" {output.plasmid_count_table}"
+		" -k"
+
+
+rule merge_read_counts_kallisto:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/kallisto_{{trimstate}}/counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_counts_kallisto_{trimstate}",
+		job_name     = "merge_counts_kallisto_{trimstate}",
+		run_time     = "23:59:00",
+		cores        = "1",
+		memory       = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+rule merge_read_plasmid_counts_kallisto:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/kallisto_{{trimstate}}/plasmid_counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/kallisto_{trimstate}/plasmid_counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_plasmid_counts_kallisto_{trimstate}",
+		job_name     = "merge_plasmid_counts_kallisto_{trimstate}",
+		run_time     = "2:00:00",
+		cores        = "1",
+		memory       = "4"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+##########################################################################################
+# mapping with bwa
+##########################################################################################
+
+
+
+rule map_reads_using_bwa:
+	input:
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trimstate}/{sample}.{trimstate}.R2.fastq.gz",
+		ref_fa = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa",
+		ref_index_pac = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.pac",
+		ref_index_bwt = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.bwt",
+		ref_index_ann = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.ann",
+		ref_index_amb = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.amb",
+		ref_index_sa = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.sa"
+	output:
+		bam = "Output/" + EXPERIMENT_NAME + "/mapping/bwa_{trimstate}/{sample}.out.bam"
+	params:
+		output_prefix= "Output/" + EXPERIMENT_NAME + "/mapping/bwa_{trimstate}/{sample}",
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="map_bwa_{trimstate}_{sample}",
+		job_name="map_bwa_{trimstate}_{sample}",
+		run_time="47:59:00",
+		cores="2",
+		memory="16"
+	threads: 8
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/bwa/bwa_{trimstate}.mapping.{sample}.log"
+	shell:
+		"bwa mem -t {threads} {input.ref_fa} {input.fastq_file_r1} {input.fastq_file_r2}" 
+		" | samtools view -bT {input.ref_fa}  - > {output.bam};"
+
+
+rule count_mapped_reads_bwa:
+	input:
+		mapped_reads = "Output/" + EXPERIMENT_NAME + "/mapping/bwa_{trimstate}/{sample}.out.bam",
+		uniq_table   = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.tab"
+	output:
+		count_table = "Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate, \D+}/counts_{sample}.tsv.gz",
+		plasmid_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate}/plasmid_counts_{sample}.tsv.gz"
+	params: 
+		col_name         = "{sample}",
+		plasmid_seq_name = PLASMID_SEQ_NAME,
+		plasmid_contamination_oligo_name = POSSIBLE_CONTAMINATION_OLIGO_NAME,
+		min_tlen = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_tlen"],
+		max_tlen = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_max_tlen"],
+		max_5prime_pos = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_max_5prime_pos"],
+		min_mapped_read1_len = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_mapped_read1_len"],
+		min_mapped_read2_len = lambda wildcards: config["count_mapped_reads_STAR"][wildcards.trimstate + "_min_mapped_read2_len"],
+		job_out_dir      = "Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file     = "count_bwa_{trimstate}_{sample}",
+		job_name         = "count_bwa_{trimstate}_{sample}",
+		run_time         = "95:59:00",
+		cores            = "2",
+		memory           = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_count_mapped_reads.py"
+		" {input.mapped_reads}"
+		" {params.col_name}"
+		" {params.plasmid_seq_name}"
+		" {params.plasmid_contamination_oligo_name}"
+		" {input.uniq_table}"
+		" {output.count_table}"
+		" {output.plasmid_count_table}"
+		" -s {params.min_tlen}"
+		" -l {params.max_tlen}"
+		" -1 {params.min_mapped_read1_len}"
+		" -2 {params.min_mapped_read2_len}"
+
+
+rule merge_read_counts_bwa:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/bwa_{{trimstate}}/counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate}/counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_counts_bwa_{trimstate}",
+		job_name     = "merge_counts_bwa_{trimstate}",
+		run_time     = "23:59:00",
+		cores        = "1",
+		memory       = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+rule merge_read_plasmid_counts_bwa:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/bwa_{{trimstate}}/plasmid_counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bwa_{trimstate}/plasmid_counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_plasmid_counts_bwa_{trimstate}",
+		job_name     = "merge_plasmid_counts_bwa_{trimstate}",
+		run_time     = "2:00:00",
+		cores        = "1",
+		memory       = "4"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+
+
+
+##########################################################################################
+# testing whether oligo sequence was as designed by variant calling (using STAR mapping)
+##########################################################################################
+
+rule run_samtools_index:
+	input:
+		ref_fa = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa"
+	output:
+		ref_idx = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.fai"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="samtools_idx",
+		job_name="samtools_idx",
+		run_time="23:59:00",
+		cores="1",
+		memory="16"
+	shell:
+		"samtools faidx {input.ref_fa};"
+
+rule run_sort_bams:
+	input:
+		mapped_reads_bam = "Output/" + EXPERIMENT_NAME + "/mapping/" + VCF_MAPPER + "/{sample}.Aligned.out.bam"
+	output:
+		mapped_reads_bam_sorted = "Output/" + EXPERIMENT_NAME + "/mapping/" + VCF_MAPPER + "/{sample}.Aligned.out.sorted.bam"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="sort_bam_{sample}",
+		job_name="sort_bam_{sample}",
+		run_time="47:59:00",
+		cores="4",
+		memory="30"
+	shell:
+		"samtools sort {input.mapped_reads_bam} -o {output.mapped_reads_bam_sorted};"
+
+rule run_call_oligo_varients:
+	input:
+		ref_fa = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa",
+		ref_idx = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa.fai",
+		mapped_reads_sorted_bams = expand("Output/" + EXPERIMENT_NAME + "/mapping/" + VCF_MAPPER + "/{sample}.Aligned.out.sorted.bam",sample=SAMPLES)
+	output:
+		pool_variants_vcf = "Output/" + EXPERIMENT_NAME + "/variant/lib_pools.var.raw.vcf"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="samtools_mpileup",
+		job_name="samtools_mpileup",
+		run_time="47:59:00",
+		cores="4",
+		memory="30"
+	shell:
+		"samtools mpileup -u -v -o {output.pool_variants_vcf} -f {input.ref_fa} {input.mapped_reads_sorted_bams};"
+
+#		"| bcftools view -bvcg - > {output.pool_variants_vcf}; bcftools view {output.pool_variants_bcf} | vcfutils.pl varFilter -D100 > {output.pool_variants_vcf};"
+
+# TODO consider using -d 20000 to increase max depth in mpileup
+
+
+
+
+##########################################################################################
+# QC
+##########################################################################################
+
+rule run_fastqc_unmapped:
+	input:
+		fastq_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trim_state}/{sample}.{trim_state}.R1.fastq.gz",
+		fastq_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/{trim_state}/{sample}.{trim_state}.R2.fastq.gz"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R1_fastqc.html",
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R2_fastqc.html",
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R1_fastqc.zip",
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R2_fastqc.zip"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="fqQC_{sample}_{trim_state}",
+		job_name="fqQC_{sample}_{trim_state}",
+		run_time="23:59:00",
+		cores="2",
+		memory="16"
+	shell:
+#		"module load fastqc; "
+		"fastqc {input.fastq_file_r1} {input.fastq_file_r2} --outdir=Output/{EXPERIMENT_NAME}/fq_reports/{wildcards.trim_state}/"
+
+
+rule run_fastqc_mapped:
+	input:
+		bam = "Output/" + EXPERIMENT_NAME + "/mapping/{mapper}_{trimstate}/{sample}.Aligned.out.bam"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/mapped/{mapper}_{trimstate, \D+}/{sample}.Aligned.out_fastqc.html",
+		"Output/" + EXPERIMENT_NAME + "/fq_reports/mapped/{mapper}_{trimstate, \D+}/{sample}.Aligned.out_fastqc.zip"
+	params:
+		outdir = "Output/" + EXPERIMENT_NAME +"/fq_reports/mapped/{mapper}_{trimstate}/",
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="fqQC_{mapper}_{trimstate}_{sample}_mapped",
+		job_name="fqQC_{mapper}_{trimstate}_{sample}_mapped",
+		run_time="23:59:00",
+		cores="2",
+		memory="16"
+	shell:
+#		"module load fastqc; "
+		"fastqc {input.bam} --outdir={params.outdir}"
+
+rule multiqc:
+	input:
+		fastqc_reads=expand("Output/" + EXPERIMENT_NAME + "/fq_reports/{trim_state}/{sample}.{trim_state}.R{read}_fastqc.{suf}",read=READS, trim_state=TRIM_STATE, sample=SAMPLES,suf=['html','zip']),
+		fastqc_mapped=expand("Output/" + EXPERIMENT_NAME + "/fq_reports/mapped/{mapper}_{trimstate}/{sample}.Aligned.out_fastqc.{suf}",sample=SAMPLES,suf=['html','zip'], mapper=MAPPERS, trimstate=TRIM_STATE)
+	output:
+		report= "Output/" + EXPERIMENT_NAME + "/multi_reports/multiqc_report.html",
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="multiQC",
+		job_name="multiQC",
+		run_time="47:59:00",
+		cores="4",
+		memory="31"
+	shell:
+		"multiqc Output/{EXPERIMENT_NAME} -o Output/{EXPERIMENT_NAME}/multi_reports -f"
+
+#		"/home/eilon/.local/bin/multiqc -f Output/{EXPERIMENT_NAME}/jobs_files ./logs Output/{EXPERIMENT_NAME}/fq_reports/raw Output/{EXPERIMENT_NAME}/fq_reports/trim Output/{EXPERIMENT_NAME}/fq_reports/mapped -n {output.report}"
+#		report= "Output/" + EXPERIMENT_NAME + "/multi_reports/SequencingQC.html"
+
+##########################################################################################
+# preparing library design data frames
+##########################################################################################
+
+rule prepare_lib_design:
+	input:
+		oligos_for_SNPs_in_selected_qtls_df_filename = "../lib_design/Output/lib_design/all_SNPs_in_selected_QTLs_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		oligos_for_SNPs_not_in_selected_qtls_df_filename = "../lib_design/Output/lib_design/all_SNPs_not_in_selected_QTLs_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		oligos_for_genes_in_selected_qtls_df_filename = "../lib_design/Output/lib_design/selected_QTL_genes_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		oligos_for_essential_genes_df_filename = "../lib_design/Output/lib_design/essential_genes_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		oligos_for_essential_genes_1bpMut_df_filename = "../lib_design/Output/lib_design/essential_genes_1bpMut_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		oligos_for_essential_genes_stop2aa_df_filename = "../lib_design/Output/lib_design/essential_genes_stop2aa_bothPolForGeneNonForSNP_V1_GG_17bp_OLIGO.tab",
+		exp_pools=expand("../lib_design/Output/pools/{pool}.txt",pool=EXP_POOLS)
+	output:
+		exp_nonuniq_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_nonuniq.tsv",
+		exp_pool_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_pool.tsv"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="prepare_lib_design",
+		job_name="prepare_lib_design",
+		run_time="01:00:00",
+		cores="1",
+		memory="8"
+	shell:
+		"python {SCRIPTS_PATH}/crispr_ana_prepare_lib_design.py "
+		"../  {LIB_DESIGN_NAME} {EXPERIMENT_NAME} -p {input.exp_pools};"
+
+
+##########################################################################################
+# drawing initial analysis figures (QC)
+##########################################################################################
+
+rule parse_counts:
+	input:
+		exp_nonuniq_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_nonuniq.tsv",
+		exp_pool_df="Output/" + EXPERIMENT_NAME + "/lib_design/exp_oligo_pool.tsv",
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/counts.tsv"
+	output:
+		pool_with_counts="Output/" + EXPERIMENT_NAME + "/Figures/pool_with_counts.tsv"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="parse_counts",
+		job_name="parse_counts",
+		run_time="01:00:00",
+		cores="1",
+		memory="8"
+	shell:
+		"python {SCRIPTS_PATH}/crispr_ana_parse_counts.py "
+		"../  {LIB_DESIGN_NAME} {EXPERIMENT_NAME};"
+		
+
+
+
+
+
+
+
+##########################################################################################
+# mapping with bowtie (TODO remove)
+##########################################################################################
+
+rule build_bowtie2_index:
+	input:
+		ref_fa="Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.fa"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.1.bt2"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="build_bowtie2_index",
+		job_name="build_bowtie2_index",
+		run_time="20:00:00",
+		cores="1",
+		memory="16"
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/bowtie2/indexing.log"
+	shell:
+#		"module load bowtie2; " 
+		"(bowtie2-build -f {input.ref_fa} Output/{EXPERIMENT_NAME}/lib_reference/lib_pools) 2> {log}"
+
+
+rule map_reads_using_bowtie:
+	input:
+		fastq_trim_file_r1 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[1] + "/{sample}" + "." + TRIM_STATE[1] + ".R1.fastq.gz",
+		fastq_trim_file_r2 = "Output/" + EXPERIMENT_NAME + "/sequencing/" + TRIM_STATE[1] + "/{sample}" + "." + TRIM_STATE[1] + ".R2.fastq.gz",
+		lib_index          = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.1.bt2"
+	output:
+		"Output/" + EXPERIMENT_NAME + "/mapping/bowtie/{sample, [^\/]+}.Aligned.out.bam"
+	params:
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file="map_bowtie_{sample}",
+		job_name="map_bowtie_{sample}",
+		run_time="47:59:00",
+		cores="2",
+		memory="15"
+	threads: 8
+	log: 
+		"Output/" + EXPERIMENT_NAME + "/logs/bowtie/mapping.{sample}.log"
+	shell:
+#		"module load samtools; "
+		"bowtie2 -X 1000"
+		" -p {threads}"
+		" --no-mixed --no-discordant --no-unal " # --local
+		" -x Output/{EXPERIMENT_NAME}/lib_reference/lib_pools"
+		" -1 {input.fastq_trim_file_r1} -2 {input.fastq_trim_file_r2}"
+		" | samtools view -S -b -h -f 2 -F 1804 -q 30 - "
+		" > Output/{EXPERIMENT_NAME}/mapping/bowtie/{wildcards.sample}.Aligned.out.bam"
+
+# old parameters: 		" | samtools view -S -b -h -f 3 -F 3852 -q 13 - "
+# -D 20 -R 3 -N 0 -L 20 -i S,1,0.50 -I 20 -t 
+
+
+rule count_mapped_reads_bowtie:
+	input:
+		mapped_reads = "Output/" + EXPERIMENT_NAME + "/mapping/bowtie/{sample}.Aligned.out.bam",
+		uniq_table   = "Output/" + EXPERIMENT_NAME + "/lib_reference/lib_pools.tab"
+	output:
+		count_table = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/counts_{sample}.tsv.gz",
+		plasmid_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/plasmid_counts_{sample}.tsv.gz"
+	params: 
+		col_name         = "{sample}",
+		plasmid_seq_name = PLASMID_SEQ_NAME,
+		plasmid_contamination_oligo_name = POSSIBLE_CONTAMINATION_OLIGO_NAME,
+		job_out_dir      = "Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file     = "count_map_bowtie_{sample}",
+		job_name         = "count_map_bowtie_{sample}",
+		run_time         = "47:59:00",
+		cores            = "1",
+		memory           = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_count_mapped_reads.py"
+		" {input.mapped_reads}"
+		" {params.col_name}"
+		" {params.plasmid_seq_name}"
+		" {params.plasmid_contamination_oligo_name}"
+		" {input.uniq_table}"
+		" {output.count_table}"
+		" {output.plasmid_count_table}"
+
+rule merge_read_counts_bowtie:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/bowtie/counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_read_counts_bowtie",
+		job_name     = "merge_read_counts_bowtie",
+		run_time     = "47:59:00",
+		cores        = "1",
+		memory       = "16"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+rule merge_read_plasmid_counts_bowtie:
+	input:
+		count_tables = expand("Output/" + EXPERIMENT_NAME + "/counts/bowtie/plasmid_counts_{sample}.tsv.gz",sample=SAMPLES)
+	output:
+		merged_count_table = "Output/" + EXPERIMENT_NAME + "/counts/bowtie/plasmid_counts.tsv"
+	params: 
+		job_out_dir="Output/" + EXPERIMENT_NAME + "/jobs_files",
+		job_out_file = "merge_plasmid_read_counts_bowtie",
+		job_name     = "merge_plasmid_read_counts_bowtie",
+		run_time     = "2:00:00",
+		cores        = "1",
+		memory       = "4"
+	shell:
+		"{SCRIPTS_PATH}/crispr_ana_merge_read_counts.py"
+		" {output.merged_count_table} -t {input.count_tables}"
+
+
+
+

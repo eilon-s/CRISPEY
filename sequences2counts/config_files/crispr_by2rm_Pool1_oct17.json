@@ -1,0 +1,55 @@
+{
+  "__default__":
+    {
+    "SCRIPTS_PATH":"/home/eilon/bin/crisprHDRlibrary",
+    "DATA_DIR":"/scratch/PI/pritch/eilon/crispr/data",
+    "EXPERIMENT_NAME":"by2rm_Pool1_oct17",
+    "LIB_DESIGN_NAME":"bothPolForGeneNonForSNP_V1_GG_17bp",
+    "INPUT_PLASMID_FILE":"/scratch/PI/pritch/eilon/crispr/lib_design/Input/plasmid/pZS160_empty_and_ADE2_guide3_donor1.fas",
+    "PLASMID_SEQ_NAME":"pZS160_empty_vector",
+    "POSSIBLE_CONTAMINATION_OLIGO_NAME":"pZS160_ADE2_guide3_donor1_oligo",
+    "ALL_POOLS":["pool1_SNPs_in_QTLs","pool2_QTL_genes","pool3_SNP_not_in_QTL","pool4_tech"],
+    "EXP_POOLS":["pool1_SNPs_in_QTLs"]
+    },
+  "pools2fa_params":
+    {
+      "oligo_seq_start_ind": 20,
+      "oligo_seq_end_ind": 194
+    },
+  "trim_read2_3stagger_old":
+    {
+      "read1_5prime_adaptor2remove": "TCGGCATCCTGCATTGAATCTGAGTTACTGTCTGTTTTCCT",
+      "read1_3prime_adaptor2remove":     "GTTTCAGAGCTATGCTGGAAACAGATCGATCGTAGC",
+      "read1_3prime_adaptor2remove_new": "GTTTCAGAGCTATGCTGGAAACAGCATAGCAAGTTGAAACAGATCGATCGTAGC",
+      "_comment": "GCTACGATCGATCTGTTTCCAGCATAGCTCTGAAAC",
+      "read2_5prime_stagger_plus_oligo3prime": "TTCCAGCATAGCTCTGAAAC",
+      "read2_3prime_adaptor2remove": "AGGAAAACAGACAGTAACTCAGATTCAATGCAGGATGCCGA"
+    },
+  "trim_read_stagger":
+    {
+      "read1_5prime_adaptor2remove": "ACACTCTTTCCCTACACGACGCTCTTCCGATCTTTGAATCTGAGTTACTGTCTGTTTTCCT",
+      "read1_3prime_adaptor2remove": "GTTTCAGAGCTATGCTGGAAACAGATCGATCGAGATCGGAAGAGCACACGTCTGAACTCCAGTCAC",
+      "read2_5prime_adaptor2remove": "GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCTCGATCGATCTGTTTCCAGCATAGCTCTGAAAC",
+      "read2_3prime_adaptor2remove": "AGGAAAACAGACAGTAACTCAGATTCAAAGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+      "min_read_len_after_trim": 100
+    },
+    "prepare_lib_design":
+    {
+      "lib_design_name":"bothPolForGeneNonForSNP_V1_GG_17bp",
+      "lib_output_name":"bothPolForGeneNonForSNP_V1_GG_17bp_SNP",
+      "exp_pools":"../lib_design/Output/pools/pool1_SNPs_in_QTLs.txt"
+    },
+    "count_mapped_reads_STAR":
+    {
+      "raw_min_tlen": 173,
+      "raw_max_tlen": 175,
+      "raw_max_5prime_pos": 1,
+      "raw_min_mapped_read1_len": 148,
+      "raw_min_mapped_read2_len": 130,
+      "trim_min_tlen": 152,
+      "trim_max_tlen": 156,
+      "trim_max_5prime_pos": 1,
+      "trim_min_mapped_read1_len": 128,
+      "trim_min_mapped_read2_len": 100
+    }
+}
