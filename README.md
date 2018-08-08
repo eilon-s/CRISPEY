@@ -1,3 +1,6 @@
 # *CRISPEY*: 
-# Mapping causal genetic variants with parallel genome editing
+# Functional genetic variants revealed by massively parallel precise genome editing
+
+
+
 
