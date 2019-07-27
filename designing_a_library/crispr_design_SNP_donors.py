@@ -25,8 +25,7 @@ import random
 
 
 sys.path.append(os.path.expanduser('~/bin/python/crispr'))
-from extract_guides_functions import cal_guide_features
-
+from extract_guides_functions import cal_guide_features, design_donor_for_SNP_guides
 
 
 
